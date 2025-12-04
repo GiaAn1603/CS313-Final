@@ -13,62 +13,71 @@ CORS(app)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class StormTransformer(nn.Module):
-    def __init__(self, input_dim, d_model=24, nhead=2, num_layers=2, max_len=500):
+    def __init__(self, input_dim, d_model=24, nhead=2, num_layers=2, max_len=200):
         super(StormTransformer, self).__init__()
         self.input_proj = nn.Linear(input_dim, d_model)
-  
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pos_encoder', pe)
+        self.pos_encoder = nn.Parameter(torch.randn(1, max_len + 50, d_model)) 
         
         encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
         self.output_proj = nn.Linear(d_model, input_dim)
-    
+
     def forward(self, src, src_key_padding_mask=None):
         x = self.input_proj(src)
-        seq_len = x.size(1)
-        x = x + self.pos_encoder[:, :seq_len, :]
+        x = x + self.pos_encoder[:, :x.size(1), :]
         output = self.transformer_encoder(x, src_key_padding_mask=src_key_padding_mask)
         prediction = self.output_proj(output)
         return prediction
 
+def haversine_distance(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    lat1_rad = np.radians(lat1)
+    lon1_rad = np.radians(lon1)
+    lat2_rad = np.radians(lat2)
+    lon2_rad = np.radians(lon2)
+    
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+    
+    a = np.sin(dlat / 2)**2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon / 2)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+    
+    return R * c
+
+MODEL_PATH = 'storm_model_weights.pth'
+SCALER_PATH = 'storm_scaler.pkl'
+
 try:
-    checkpoint = torch.load('storm_predictor.pkl', map_location=device, weights_only=False)
-    
-    scaler = checkpoint['scaler']
+    # Load Config và Weights
+    checkpoint = torch.load(MODEL_PATH, map_location=device)
+    config = checkpoint['model_config']
     feature_cols = checkpoint['feature_cols']
-    model_config = checkpoint['model_config']
+    saved_max_len = checkpoint['max_len']
     
+    print("Feature columns used:", feature_cols)
+
+    # Khởi tạo Model
     model = StormTransformer(
-        input_dim=model_config['input_dim'],
-        d_model=model_config['d_model'],
-        nhead=model_config['nhead'],
-        num_layers=model_config['num_layers'],
-        max_len=266
+        input_dim=config['input_dim'],
+        d_model=config['d_model'],
+        nhead=config['nhead'],
+        num_layers=config['num_layers'],
+        max_len=saved_max_len
     )
     
-    state_dict = checkpoint['model_state_dict']
-    
-    if 'pos_encoder' in state_dict:
-        print("Removing pos_encoder from checkpoint (using fixed positional encoding)")
-        del state_dict['pos_encoder']
-    
-    model.load_state_dict(state_dict, strict=False)
-    
+    # Load state dict
+    model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
     model.eval()
+    print("Load Model thành công!")
+
+    # Load Scaler
+    scaler = joblib.load(SCALER_PATH)
+    print("Load Scaler thành công!")
     
-    print('Model loaded successfully!')
-    print(f"Feature columns: {feature_cols}")
-    
-except Exception as e:
-    print(f"Error loading model: {e}")
+except FileNotFoundError as e:
+    print(f"Lỗi: Không tìm thấy file. Hãy chắc chắn bạn đã upload file {MODEL_PATH} và {SCALER_PATH}")
     raise e
 
 DATA_PATH = 'storms_data_2025.csv'
@@ -201,9 +210,8 @@ def predict():
             }), 400
         
         raw_array = np.array(raw_data)
-        features_without_time = [col for col in feature_cols if col != 'ISO TIME']
-        input_df = pd.DataFrame(raw_array, columns=features_without_time)
-        data_scaled = scaler.transform(input_df)
+        data_scaled = scaler.transform(raw_array)
+        
         input_seq_scaled = data_scaled[:context_len]
         input_tensor = torch.FloatTensor(input_seq_scaled).unsqueeze(0).to(device)
         
@@ -221,9 +229,7 @@ def predict():
                 current_input = torch.cat((current_input[:, 1:, :], next_step_tensor), dim=1)
         
         prediction_matrix = np.array(prediction_seq_scaled)
-        prediction_df = pd.DataFrame(prediction_matrix, columns=features_without_time)
-        prediction_real = scaler.inverse_transform(prediction_df)
-        
+        prediction_real = scaler.inverse_transform(prediction_matrix)
         lat_idx = feature_cols.index('LAT')
         lon_idx = feature_cols.index('LON')
         
