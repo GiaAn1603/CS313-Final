@@ -23,6 +23,7 @@ Một **ứng dụng web** giúp theo dõi và dự đoán đường đi của c
 ```bash
 VITE_OPENWEATHER_API_KEY=YOUR_OPENWEATHER_API_KEY
 VITE_BE_BASE_URL=YOUR_BE_BASE_URL
+VITE_MODEL_API_URL=YOUR_MODEL_API_URL
 ```
 
 ## Chạy Frontend
